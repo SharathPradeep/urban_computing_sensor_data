@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Sensor Logger (GPS + Microphone) — CSV</title>
+<title>Sensor Logger (GPS + Microphone)</title>
 <body style="font:16px -apple-system,system-ui; padding:16px; line-height:1.35">
 <h2>Sensor Logger (GPS + Microphone)</h2>
 
@@ -10,7 +10,7 @@
 <br>
 <button id="start">Start</button>
 <button id="stop" disabled>Stop</button>
-<button id="download" disabled>Download CSV</button>
+<button id="download" disabled>Download Sensor Log</button>
 
 <hr>
 
@@ -19,145 +19,82 @@
 
 <script>
 (() => {
-  const statusEl = document.getElementById('status');
-  const micDisplay = document.getElementById('micDisplay');
-  const locationDisplay = document.getElementById('locationDisplay');
-  const startBtn = document.getElementById('start');
-  const stopBtn  = document.getElementById('stop');
-  const dlBtn    = document.getElementById('download');
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status'), micEl = $('micDisplay'), locEl = $('locationDisplay');
+  const startBtn = $('start'), stopBtn = $('stop'), dlBtn = $('download');
 
-  let mediaStream, audioCtx, analyser, micSource, rafId;
-  let gpsIntervalId = null;           // <-- 1-second sampler id
+  let stream, ctx, ana, src, raf, gpsId = null, logging = false, lastDB = NaN;
   const buf = new Float32Array(2048);
-  let lastDB = NaN;
-  let logging = false;
+  const csv = ['sep=,','timestamp,lat,lon,accuracy_m,speed_mps,sound_dbfs'];
 
-  // CSV buffer. Put a 'sep=,' for Excel convenience, then header row.
-  const csv = [
-    'sep=,',
-    'timestamp,lat,lon,accuracy_m,speed_mps,sound_dbfs'
-  ];
+  const fmt = (n, d) => Number.isFinite(n) ? Number(n).toFixed(d) : '';
+  const dbfs = rms => 20 * Math.log10(Math.max(rms, 1e-12));
 
-  function setStatus(msg) { statusEl.textContent = msg; }
-  function rmsToDbfs(rms) { return 20 * Math.log10(Math.max(rms, 1e-12)); }
-
-  function getDbFromAnalyser() {
-    analyser.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-    const rms = Math.sqrt(sum / buf.length);
-    return rmsToDbfs(rms);
+  function sampleDB() {
+    ana.getFloatTimeDomainData(buf);
+    let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+    lastDB = dbfs(Math.sqrt(s / buf.length));
+    micEl.textContent = `Mic: ${lastDB.toFixed(1)} dBFS`;
+    if (logging) raf = requestAnimationFrame(sampleDB);
   }
 
-  function loop() {
-    if (!logging) return;
-    lastDB = getDbFromAnalyser();
-    micDisplay.textContent = `Mic: ${lastDB.toFixed(1)} dBFS`;
-    rafId = requestAnimationFrame(loop);
-  }
-
-  function fmt(n, digits) {
-    return (Number.isFinite(n) ? Number(n).toFixed(digits) : '');
-  }
-
-  // Called on each successful position read
-  function onPos(pos) {
-    const lat = pos.coords.latitude;
-    const lon = pos.coords.longitude;
-    const acc = pos.coords.accuracy;         // meters
-    const spd = pos.coords.speed;            // m/s (may be null)
-
-    locationDisplay.textContent =
-      `Location: ${fmt(lat, 6)}, ${fmt(lon, 6)} (±${fmt(acc, 1)}m)`;
-
-    // Compose a CSV row. Empty string for missing values.
-    const row = [
+  function onPos(p) {
+    const { latitude: lat, longitude: lon, accuracy: acc, speed: spd } = p.coords;
+    locEl.textContent = `Location: ${fmt(lat,6)}, ${fmt(lon,6)} (±${fmt(acc,1)}m)`;
+    csv.push([
       new Date().toISOString(),
-      fmt(lat, 6),
-      fmt(lon, 6),
-      fmt(acc, 1),
-      Number.isFinite(spd) ? fmt(spd, 2) : '',
-      Number.isFinite(lastDB) ? fmt(lastDB, 2) : ''
-    ].join(',');
-
-    csv.push(row);
+      fmt(lat,6), fmt(lon,6), fmt(acc,1),
+      Number.isFinite(spd) ? fmt(spd,2) : '',
+      Number.isFinite(lastDB) ? fmt(lastDB,2) : ''
+    ].join(','));
   }
 
-  function onGeoError(err) {
-    locationDisplay.textContent = `Location: Error - ${err.message}`;
-    // Still keep running; next tick may succeed.
-  }
+  function onGeoErr(e){ locEl.textContent = `Location: Error - ${e.message}`; }
 
-  // Start 1 Hz GPS sampling using getCurrentPosition
   function startGPS() {
-    // Do an immediate read, then every 1s
     const opts = { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 };
-    navigator.geolocation.getCurrentPosition(onPos, onGeoError, opts);
-    gpsIntervalId = setInterval(() => {
-      navigator.geolocation.getCurrentPosition(onPos, onGeoError, opts);
-    }, 500);
+    navigator.geolocation.getCurrentPosition(onPos, onGeoErr, opts);
+    gpsId = setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onGeoErr, opts), 250);
   }
 
   async function start() {
     try {
-      // Microphone
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      micSource = audioCtx.createMediaStreamSource(mediaStream);
-      micSource.connect(analyser);
-
-      // Geolocation availability check
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      ana = ctx.createAnalyser(); ana.fftSize = 2048;
+      src = ctx.createMediaStreamSource(stream); src.connect(ana);
       if (!('geolocation' in navigator)) throw new Error('Geolocation not available');
-      startGPS(); // <-- begin 1-second GPS reads
-
-      logging = true;
-      loop();
-      setStatus('Running...');
-      startBtn.disabled = true;
-      stopBtn.disabled  = false;
-      dlBtn.disabled    = false;
-    } catch (e) {
-      setStatus('Error: ' + e.message);
-      console.error(e);
-    }
+      startGPS();
+      logging = true; sampleDB();
+      statusEl.textContent = 'Running...';
+      startBtn.disabled = true; stopBtn.disabled = false; dlBtn.disabled = false;
+    } catch (e) { statusEl.textContent = 'Error: ' + e.message; console.error(e); }
   }
 
   function stop() {
     logging = false;
-    cancelAnimationFrame(rafId);
-
-    if (gpsIntervalId != null) {
-      clearInterval(gpsIntervalId);
-      gpsIntervalId = null;
-    }
-
-    if (micSource) try { micSource.disconnect(); } catch {}
-    if (audioCtx) try { audioCtx.close(); } catch {}
-    if (mediaStream) {
-      try { mediaStream.getTracks().forEach(t => t.stop()); } catch {}
-    }
-
-    setStatus('Stopped');
-    startBtn.disabled = false;
-    stopBtn.disabled  = true;
+    if (raf) cancelAnimationFrame(raf);
+    if (gpsId != null) { clearInterval(gpsId); gpsId = null; }
+    try { src && src.disconnect(); } catch {}
+    try { ctx && ctx.close(); } catch {}
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
+    statusEl.textContent = 'Stopped';
+    startBtn.disabled = false; stopBtn.disabled = true;
   }
 
   function download() {
-    // Add a UTF-8 BOM so Excel opens it nicely.
-    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+    const bom = new Uint8Array([0xEF,0xBB,0xBF]);
     const blob = new Blob([bom, csv.join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `sensor_log_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+    a.download = `sensor_log_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
 
-  startBtn.addEventListener('click', start, { passive: true });
-  stopBtn.addEventListener('click', stop, { passive: true });
-  dlBtn.addEventListener('click', download, { passive: true });
+  startBtn.addEventListener('click', start, { passive:true });
+  stopBtn.addEventListener('click', stop, { passive:true });
+  dlBtn.addEventListener('click', download, { passive:true });
 })();
 </script>
 </body>
