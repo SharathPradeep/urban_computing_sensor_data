@@ -25,7 +25,9 @@
 
   let stream, ctx, ana, src, raf, gpsId = null, logging = false, lastDB = NaN;
   const buf = new Float32Array(2048);
-  const csv = ['sep=,','timestamp,lat,lon,accuracy_m,speed_mps,sound_dbfs'];
+
+  // CSV header with speed removed
+  const csv = ['sep=,','timestamp,lat,lon,accuracy_m,sound_dbfs'];
 
   const fmt = (n, d) => Number.isFinite(n) ? Number(n).toFixed(d) : '';
   const dbfs = rms => 20 * Math.log10(Math.max(rms, 1e-12));
@@ -39,12 +41,11 @@
   }
 
   function onPos(p) {
-    const { latitude: lat, longitude: lon, accuracy: acc, speed: spd } = p.coords;
+    const { latitude: lat, longitude: lon, accuracy: acc } = p.coords; // speed removed
     locEl.textContent = `Location: ${fmt(lat,6)}, ${fmt(lon,6)} (±${fmt(acc,1)}m)`;
     csv.push([
       new Date().toISOString(),
       fmt(lat,6), fmt(lon,6), fmt(acc,1),
-      Number.isFinite(spd) ? fmt(spd,2) : '',
       Number.isFinite(lastDB) ? fmt(lastDB,2) : ''
     ].join(','));
   }
